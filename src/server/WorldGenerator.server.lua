@@ -3,7 +3,7 @@
 	Генерує базову тестову зону світу Wivials: містечко (TownArea) з площею,
 	вуличною мережею, ліхтарями, фонтанами та подвір'ями з будинками в реальному масштабі,
 	і сусідню дику галявину (WildArea). Обидві зони наповнені рослинністю й оточені горами GrassMountain (з колізією),
-	а весь світ стоїть на суцільному WorldFloor усередині невидимого кільця SafeZoneBoundary. Дерева й трава — клони з AssetTemplates.
+	а весь світ стоїть на WorldFloor (дві секції кольору зон) усередині невидимого кільця SafeZoneBoundary. Дерева й трава — клони з AssetTemplates.
 	Виконується один раз при старті сервера.
 ]]
 
@@ -27,6 +27,8 @@ local WILD_SIZE = 100
 -- Дика зона впритул до східного краю містечка
 local WILD_CENTER = Vector3.new(TOWN_HALF + WILD_SIZE / 2, 0, 0)
 local WILD_HALF = WILD_SIZE / 2
+local TOWN_GRASS_COLOR = Color3.fromRGB(110, 210, 80) -- газон містечка (і WorldFloor під ним)
+local WILD_GRASS_COLOR = Color3.fromRGB(40, 150, 50) -- газон дикої зони (і WorldFloor під нею)
 
 local PLAZA_SIZE = 40 -- збільшено під фонтани, лавочки й ліхтарі
 local PLAZA_HALF = PLAZA_SIZE / 2
@@ -602,7 +604,7 @@ town.PrimaryPart = makePart("Part", {
 	Size = Vector3.new(TOWN_SIZE, GROUND_THICKNESS, TOWN_SIZE),
 	Position = TOWN_CENTER + Vector3.new(0, GROUND_THICKNESS / 2, 0),
 	Material = Enum.Material.Grass,
-	Color = Color3.fromRGB(110, 210, 80),
+	Color = TOWN_GRASS_COLOR,
 }, town)
 
 -- Центральна площа, трохи "втоплена" в газон, щоб сходинка була невеликою
@@ -1179,7 +1181,7 @@ wild.PrimaryPart = makePart("Part", {
 	Size = Vector3.new(WILD_SIZE, GROUND_THICKNESS, WILD_SIZE),
 	Position = WILD_CENTER + Vector3.new(0, GROUND_THICKNESS / 2, 0),
 	Material = Enum.Material.Grass,
-	Color = Color3.fromRGB(40, 150, 50),
+	Color = WILD_GRASS_COLOR,
 }, wild)
 
 -- Маркер центральної відкритої галявини (невидимий, для майбутніх зустрічей з Wivi)
@@ -1584,7 +1586,7 @@ end
 --        zone-based:     найдальша точка floorRect + SAFE_ZONE_EXTRA;
 --        mountain-based: найдальша точка будь-якого клону GrassMountain (фінальні позиції) + SAFE_ZONE_MOUNTAIN_MARGIN,
 --      тож навіть гравець, що якось опинився б на горі, усе одно всередині кільця.
---    • WorldFloor — диск під усім кільцем (до зовнішньої грані стін), трохи нижче за газони зон:
+--    • WorldFloor — дві секції кольору зон під усім кільцем (до зовнішньої грані стін), трохи нижче за газони зон:
 --      закриває будь-які шви між зонами і не лишає порожнечі між краєм підлоги та стіною.
 ---------------------------------------------------------------------
 local safeZone = makeFolder("SafeZone", world)
@@ -1627,13 +1629,26 @@ local mountainRadius = (#mountainClones > 0) and (mountainFarthest + SAFE_ZONE_M
 local safeRadius = math.max(zoneRadius, mountainRadius)
 local safeRadiusSource = (mountainRadius > zoneRadius) and "mountain-based" or "zone-based"
 
--- WorldFloor: диск радіусом до зовнішньої грані стін; верх — на WORLD_FLOOR_DROP нижче за газони зон
+-- WorldFloor: квадрат, що вміщає коло радіусом до зовнішньої грані стін; верх — на WORLD_FLOOR_DROP нижче
+-- за газони зон. Дві секції кольору газону над ними: усе на захід від стику містечка й дикої зони
+-- (x = TOWN_HALF) — колір містечка, на схід — колір дикої зони. Шов підкладки продовжує ту саму лінію,
+-- де газони зон уже стикуються, тож нового видимого кордону між відтінками не з'являється.
 local floorRadius = safeRadius + SAFE_ZONE_THICKNESS + 2
 local floorTop = GROUND_TOP - WORLD_FLOOR_DROP
-local worldFloor = makeVerticalCylinder("WorldFloor", safeCenter.X, floorTop - 1, safeCenter.Y, 1, floorRadius * 2, {
-	Material = Enum.Material.Grass,
-	Color = Color3.fromRGB(45, 110, 50),
-}, world)
+local floorSeamX = TOWN_HALF
+local worldFloor = makeModel("WorldFloor", world)
+for _, section in ipairs({
+	{ name = "TownSection", minX = safeCenter.X - floorRadius, maxX = floorSeamX, color = TOWN_GRASS_COLOR },
+	{ name = "WildSection", minX = floorSeamX, maxX = safeCenter.X + floorRadius, color = WILD_GRASS_COLOR },
+}) do
+	makePart("Part", {
+		Name = section.name,
+		Size = Vector3.new(section.maxX - section.minX, 1, floorRadius * 2),
+		Position = Vector3.new((section.minX + section.maxX) / 2, floorTop - 0.5, safeCenter.Y),
+		Material = Enum.Material.Grass,
+		Color = section.color,
+	}, worldFloor)
+end
 
 -- OuterSafetyRing: прямі сегменти, дотичні до кола safeRadius. Точна сторона многокутника по
 -- зовнішній грані стіни — 2·(R + товщина)·tan(π/N); кожен сегмент довший на SAFE_ZONE_OVERLAP
@@ -1680,119 +1695,109 @@ local function countSafeZoneGaps()
 	return gaps
 end
 
--- SafeZoneBoundary — стіна в тілі гір. Підніжжя (внутрішній край гір) — на лінії ігрової зони (playEdges).
--- Внутрішня (до гравця) грань стіни — на offset studs глибше за підніжжя, стіна росте назовні на товщину:
--- гравець піднімається на камінь на offset studs і лише тоді впирається в стіну.
--- Offset підбирається для КОЖНОГО клону окремо: бажаний MOUNTAIN_WALL_DEPTH, але якщо гора в цьому місці
--- тонша за offset + товщину стіни, її сегмент стає мілкішим (MOUNTAIN_WALL_FALLBACK її товщини) — щоб стіна
--- не вилізла крізь дальній край гори. Кожен клон отримує свій сегмент уздовж ребра; стики сусідніх сегментів —
--- посередині зони перекриття двох клонів, а там, де offset змінюється, стоїть поперечна стінка-сходинка.
+-- SafeZoneBoundary — окремий сегмент стіни в тілі КОЖНОГО клону GrassMountain, повернутий разом із ним.
+-- • Габарити клону — його орієнтована коробка (GetBoundingBox: реальний масштаб і власний випадковий поворот).
+-- • "Перед" гори — та з чотирьох бічних граней коробки, що найбільше дивиться в ігрову зону (проти зовнішньої
+--   нормалі ряду клону). Сегмент паралельний цій грані, завширшки як вона + MOUNTAIN_WALL_OVERLAP з кожного
+--   боку, і стоїть на offset studs углиб від неї (товщина стіни — ще далі).
+-- • Offset — MOUNTAIN_WALL_DEPTH, якщо гора в цьому напрямку товща за offset + товщину стіни; інакше
+--   MOUNTAIN_WALL_FALLBACK її товщини (і зовнішня грань стіни все одно лишається в камені).
+-- • Сусідні сегменти можуть бути повернуті під різними кутами, тож кінець кожного з'єднано з початком
+--   наступного (по колу, у порядку рядів) перемичкою Joint: стіна — замкнена ламана без щілин.
+local MOUNTAIN_WALL_OVERLAP = 2.5
 
--- Положення клону в системі ребра підніжжя: near..far — назовні від підніжжя, sMin..sMax — уздовж ребра
-local mountainWallInfo = {} -- клон → { near, far, sMin, sMax, depth, reduced }
+local mountainWallInfo = {} -- клон → { depth, offset, reduced, cframe, width, startPoint, endPoint }
 local reducedWallSegments = 0
-for _, clone in ipairs(mountainClones) do
-	local edge = playEdges[mountainRowIndex[clone]]
-	local rect = modelRect(clone)
-	local info = { near = math.huge, far = -math.huge, sMin = math.huge, sMax = -math.huge }
-	for _, corner in ipairs({
-		Vector2.new(rect.minX, rect.minZ), Vector2.new(rect.maxX, rect.minZ),
-		Vector2.new(rect.minX, rect.maxZ), Vector2.new(rect.maxX, rect.maxZ),
-	}) do
-		local d, s = (corner - edge.a):Dot(edge.out), (corner - edge.a):Dot(edge.dir)
-		info.near, info.far = math.min(info.near, d), math.max(info.far, d)
-		info.sMin, info.sMax = math.min(info.sMin, s), math.max(info.sMax, s)
-	end
-	info.depth = MOUNTAIN_WALL_DEPTH
-	if info.depth + MOUNTAIN_WALL_THICKNESS >= info.far then
-		-- Гора тонша, ніж треба: частка товщини, але так, щоб і зовнішня грань стіни лишилась у камені
-		info.depth = math.min(info.far * MOUNTAIN_WALL_FALLBACK, info.far - MOUNTAIN_WALL_THICKNESS - 0.5)
-		info.reduced = true
-		reducedWallSegments += 1
-		local p = clone:GetPivot().Position
-		warn(string.format(
-			"[WorldGenerator] %s at (%.1f, %.1f, %.1f) is only %.1f studs thick from its foot — SafeZoneBoundary offset reduced from +%.1f to +%.1f for this segment (path: %s)",
-			clone.Name, p.X, p.Y, p.Z, info.far, MOUNTAIN_WALL_DEPTH, info.depth, clone:GetFullName()))
-	end
-	mountainWallInfo[clone] = info
-end
-
 local frontWall = makeModel("SafeZoneBoundary", safeZone)
-local frontWallParts = 0
+local frontWallJoints = 0
 do
-	-- Прямокутник стіни в системі ребра: s1..s2 уздовж ребра, d1..d2 назовні від підніжжя (ребра осе-орієнтовані)
-	local function wallBox(name, edge, s1, s2, d1, d2)
-		if s2 - s1 <= 0.01 then
-			return
+	local wallY = (SAFE_ZONE_BOTTOM + SAFE_ZONE_TOP) / 2
+
+	for index, clone in ipairs(mountainClones) do
+		local edge = playEdges[mountainRowIndex[clone]]
+		local inward = Vector3.new(-edge.out.X, 0, -edge.out.Y)
+		local cf, size = clone:GetBoundingBox()
+		local axes
+		if math.abs(cf.UpVector.Y) > 0.99 then
+			axes = { { cf.RightVector, size.X, size.Z }, { cf.LookVector, size.Z, size.X } }
+		else
+			-- Шаблон нахилений: коробка не стоїть рівно, беремо осе-орієнтовані межі
+			local rect = modelRect(clone)
+			cf = CFrame.new((rect.minX + rect.maxX) / 2, 0, (rect.minZ + rect.maxZ) / 2)
+			axes = { { Vector3.xAxis, rect.maxX - rect.minX, rect.maxZ - rect.minZ }, { Vector3.zAxis, rect.maxZ - rect.minZ, rect.maxX - rect.minX } }
 		end
-		local c = edge.a + edge.dir * ((s1 + s2) / 2) + edge.out * ((d1 + d2) / 2)
+
+		-- Передня грань: вісь (зі знаком), що найближча до напрямку в ігрову зону
+		local front, depth, width, best = nil, 0, 0, -math.huge
+		for _, axis in ipairs(axes) do
+			local v = Vector3.new(axis[1].X, 0, axis[1].Z).Unit
+			for _, sign in ipairs({ 1, -1 }) do
+				local dot = (v * sign):Dot(inward)
+				if dot > best then
+					front, depth, width, best = v * sign, axis[2], axis[3], dot
+				end
+			end
+		end
+
+		local offset, reduced = MOUNTAIN_WALL_DEPTH, false
+		if offset + MOUNTAIN_WALL_THICKNESS >= depth then
+			offset = math.min(depth * MOUNTAIN_WALL_FALLBACK, depth - MOUNTAIN_WALL_THICKNESS - 0.5)
+			reduced = true
+			reducedWallSegments += 1
+		end
+
+		local center = Vector3.new(cf.Position.X, wallY, cf.Position.Z)
+		local frontPoint = center + front * (depth / 2)
+		local wallCenter = frontPoint - front * (offset + MOUNTAIN_WALL_THICKNESS / 2)
+		local wallCf = CFrame.lookAt(wallCenter, wallCenter + front) -- RightVector — уздовж передньої грані
+		local wallWidth = width + 2 * MOUNTAIN_WALL_OVERLAP
 		makePart("Part", {
-			Name = name,
-			Size = (edge.out.X ~= 0)
-				and Vector3.new(d2 - d1, safeHeight, s2 - s1)
-				or Vector3.new(s2 - s1, safeHeight, d2 - d1),
-			Position = Vector3.new(c.X, (SAFE_ZONE_BOTTOM + SAFE_ZONE_TOP) / 2, c.Y),
+			Name = "Wall_" .. clone.Name,
+			Size = Vector3.new(wallWidth, safeHeight, MOUNTAIN_WALL_THICKNESS),
+			CFrame = wallCf,
 			Material = Enum.Material.SmoothPlastic,
 			Transparency = 1,
 			CanCollide = true,
 			CastShadow = false,
 		}, frontWall)
-		frontWallParts += 1
+
+		-- Кінці сегмента (по осі стіни): "початок" — той, що раніше вздовж ряду
+		local a = wallCenter - wallCf.RightVector * (wallWidth / 2)
+		local b = wallCenter + wallCf.RightVector * (wallWidth / 2)
+		local dir3 = Vector3.new(edge.dir.X, 0, edge.dir.Y)
+		if (b - a):Dot(dir3) < 0 then
+			a, b = b, a
+		end
+		mountainWallInfo[clone] = {
+			index = index, depth = depth, offset = offset, reduced = reduced, startPoint = a, endPoint = b,
+		}
 	end
 
-	-- Сегменти кожного ребра: по одному на клон (упорядковано вздовж ребра); ряд без гір — один сегмент
-	local pieces = {}
-	for i, edge in ipairs(playEdges) do
-		local row = {}
-		for _, clone in ipairs(mountainClones) do
-			if mountainRowIndex[clone] == i then
-				table.insert(row, mountainWallInfo[clone])
-			end
-		end
-		table.sort(row, function(a, b)
-			return a.sMin < b.sMin
-		end)
-		local list = {}
-		for k, info in ipairs(row) do
-			list[k] = {
-				s1 = (k > 1) and (row[k - 1].sMax + info.sMin) / 2 or 0,
-				s2 = (k < #row) and (info.sMax + row[k + 1].sMin) / 2 or edge.length,
-				depth = info.depth,
-			}
-		end
-		if #list == 0 then
-			list[1] = { s1 = 0, s2 = edge.length, depth = MOUNTAIN_WALL_DEPTH }
-		end
-		pieces[i] = list
-	end
-
-	-- Кути: на опуклому сегмент доходить до зовнішньої грані стіни сусіднього ребра, на увігнутому —
-	-- до її внутрішньої грані (сусідня стіна сама закриває кутовий квадрат)
-	for i, edge in ipairs(playEdges) do
-		local list = pieces[i]
-		local prevList = pieces[(i - 2) % #playEdges + 1]
-		local prevDepth, nextDepth = prevList[#prevList].depth, pieces[i % #playEdges + 1][1].depth
-		list[1].s1 = edge.convexStart and -(prevDepth + MOUNTAIN_WALL_THICKNESS) or prevDepth
-		list[#list].s2 = edge.convexEnd and (edge.length + nextDepth + MOUNTAIN_WALL_THICKNESS) or (edge.length - nextDepth)
-		for k, piece in ipairs(list) do
-			-- Внутрішні стики — внахлест на 0.5 stud з кожного боку
-			local s1 = piece.s1 - ((k > 1) and 0.5 or 0)
-			local s2 = piece.s2 + ((k < #list) and 0.5 or 0)
-			wallBox(string.format("Wall%d_%d", i, k), edge, s1, s2, piece.depth, piece.depth + MOUNTAIN_WALL_THICKNESS)
-			local nextPiece = list[k + 1]
-			if nextPiece and math.abs(nextPiece.depth - piece.depth) > 0.01 then
-				-- Сходинка між сегментами різної глибини: інакше між ними лишився б прохід уздовж ребра
-				wallBox(string.format("Step%d_%d", i, k), edge,
-					piece.s2 - MOUNTAIN_WALL_THICKNESS / 2, piece.s2 + MOUNTAIN_WALL_THICKNESS / 2,
-					math.min(piece.depth, nextPiece.depth), math.max(piece.depth, nextPiece.depth) + MOUNTAIN_WALL_THICKNESS)
-			end
+	-- Перемички між кінцем сегмента і початком наступного (останній — з першим)
+	local wallPart = MOUNTAIN_WALL_THICKNESS
+	for k, clone in ipairs(mountainClones) do
+		local nextClone = mountainClones[k % #mountainClones + 1]
+		local p, q = mountainWallInfo[clone].endPoint, mountainWallInfo[nextClone].startPoint
+		local gap = (q - p).Magnitude
+		if nextClone ~= clone and gap > 0.05 then
+			local mid = (p + q) / 2
+			makePart("Part", {
+				Name = string.format("Joint_%s", clone.Name),
+				Size = Vector3.new(wallPart, safeHeight, gap + wallPart), -- + товщина: закриває кути на стиках
+				CFrame = CFrame.lookAt(mid, q),
+				Material = Enum.Material.SmoothPlastic,
+				Transparency = 1,
+				CanCollide = true,
+				CastShadow = false,
+			}, frontWall)
+			frontWallJoints += 1
 		end
 	end
 end
 
 -- Замкненість стіни: промені з ігрової зони (2 studs перед підніжжям) назовні через кожні 2 studs уздовж
--- кожного ребра на тих самих висотах мають влучити в стіну. Промені довгі: біля увігнутих кутів промінь
--- іде вздовж кам'яної кишені й упирається в стіну іншого ребра. Повертає кількість промахів.
+-- кожного ребра на кількох висотах мають влучити в стіну (сегмент або перемичку). Промені довгі: біля
+-- увігнутих кутів промінь іде вздовж кам'яної кишені й упирається в стіну іншого ряду. Повертає кількість промахів.
 local function countFrontWallGaps()
 	local params = RaycastParams.new()
 	params.FilterType = Enum.RaycastFilterType.Include
@@ -1815,38 +1820,32 @@ local function countFrontWallGaps()
 	return gaps
 end
 
--- Перевірка гір: сегмент стіни кожного клону має проходити КРІЗЬ його тіло (уздовж нормалі ряду):
--- найближча точка гори < внутрішня грань стіни, а зовнішня грань стіни < найдальша точка гори.
--- Інакше — попередження: стіна перед горою (на траві), позаду неї або вилазить крізь дальній край.
--- Повертає кількість проблемних клонів і мін./макс. глибину каменю перед стіною.
+-- Перевірка кожного сегмента: у системі ЙОГО гори (уздовж нормалі передньої грані після повороту) стіна
+-- займає offset..offset + товщина від передньої грані; вона в тілі гори, якщо 0 < offset і offset + товщина < товщини гори.
+-- Друкує рядок на кожну гору; повертає кількість сегментів поза тілом гори і мін./макс. offset.
 local function checkWallThroughMountains()
-	local bad, minStep, maxStep = 0, math.huge, -math.huge
+	local bad, minOffset, maxOffset = 0, math.huge, -math.huge
 	for _, clone in ipairs(mountainClones) do
 		local info = mountainWallInfo[clone]
-		local wallInner, wallOuter = info.depth, info.depth + MOUNTAIN_WALL_THICKNESS
-		local step = wallInner - info.near
-		minStep = math.min(minStep, step)
-		maxStep = math.max(maxStep, step)
-
-		local problem
-		if wallOuter <= info.near then
-			problem = "is entirely IN FRONT of"
-		elseif wallInner >= info.far then
-			problem = "is entirely BEHIND"
-		elseif wallInner <= info.near then
-			problem = "starts in front of the foot of"
-		elseif wallOuter >= info.far then
-			problem = "sticks out behind"
+		local inside = info.offset > 0 and info.offset + MOUNTAIN_WALL_THICKNESS < info.depth
+		minOffset = math.min(minOffset, info.offset)
+		maxOffset = math.max(maxOffset, info.offset)
+		local p = clone:GetPivot().Position
+		local line = string.format(
+			"[WorldGenerator]   segment %d %s at (%.1f, %.1f): mountain %.1f studs deep, offset +%.1f%s, wall %.1f..%.1f — %s",
+			info.index, clone.Name, p.X, p.Z, info.depth, info.offset,
+			info.reduced and string.format(" (REDUCED from +%.1f: mountain too thin)", MOUNTAIN_WALL_DEPTH) or "",
+			info.offset, info.offset + MOUNTAIN_WALL_THICKNESS, inside and "inside the mountain body" or "OUTSIDE the mountain body")
+		if inside and not info.reduced then
+			print(line)
+		else
+			warn(line)
 		end
-		if problem then
+		if not inside then
 			bad += 1
-			local p = clone:GetPivot().Position
-			warn(string.format(
-				"[WorldGenerator] SafeZoneBoundary %s %s at (%.1f, %.1f, %.1f): mountain %.1f..%.1f, wall %.1f..%.1f from the foot (path: %s)",
-				problem, clone.Name, p.X, p.Y, p.Z, info.near, info.far, wallInner, wallOuter, clone:GetFullName()))
 		end
 	end
-	return bad, minStep, maxStep
+	return bad, minOffset, maxOffset
 end
 
 -- Довідково: "near point" — найближча до центру світу точка гір
@@ -2026,8 +2025,8 @@ do
 	-- WorldFloor: розмір і чи повністю покриває обидві зони
 	local coverage = floorCoverageMargin()
 	print(string.format(
-		"[WorldGenerator] WorldFloor: disc radius %.1f (diameter %.1f) at center (%.1f, %.1f), top Y = %.1f; zones X %.0f..%.0f, Z %.0f..%.0f; min margin beyond zones = %.1f studs",
-		floorRadius, floorRadius * 2, safeCenter.X, safeCenter.Y, floorTop,
+		"[WorldGenerator] WorldFloor: 2 sections (town colour west of x = %.0f, wild colour east of it — same seam as the zones' lawns), covering radius %.1f around (%.1f, %.1f), top Y = %.1f; zones X %.0f..%.0f, Z %.0f..%.0f; min margin beyond zones = %.1f studs",
+		floorSeamX, floorRadius, safeCenter.X, safeCenter.Y, floorTop,
 		worldRect.minX, worldRect.maxX, worldRect.minZ, worldRect.maxZ, coverage))
 	if coverage < WORLD_FLOOR_MARGIN then
 		warn(string.format("[WorldGenerator] WorldFloor is too small: only %.1f studs beyond the zones (need %d) — some area may be uncovered",
@@ -2043,18 +2042,18 @@ do
 	-- SafeZoneBoundary (у тілі гір): замкненість і чи проходить стіна крізь кожну гору
 	local frontGaps = countFrontWallGaps()
 	local frontClosed = frontGaps == 0
-	local mountainsMisplaced, minStep, maxStep = checkWallThroughMountains()
 	print(string.format(
-		"[WorldGenerator] SafeZoneBoundary (inside mountains): %d parts (per-mountain segments + steps), offset +%.1f studs INTO the mountain from its foot, thickness %d, Y %d..%d; closed = %s",
-		frontWallParts, MOUNTAIN_WALL_DEPTH, MOUNTAIN_WALL_THICKNESS, SAFE_ZONE_BOTTOM, SAFE_ZONE_TOP, tostring(frontClosed)))
+		"[WorldGenerator] SafeZoneBoundary (inside mountains): %d individual wall segments for %d GrassMountains (each rotated with its mountain) + %d joints; offset +%.1f studs INTO each mountain from its front face, thickness %d, Y %d..%d; closed = %s",
+		#mountainClones, #mountainClones, frontWallJoints, MOUNTAIN_WALL_DEPTH, MOUNTAIN_WALL_THICKNESS,
+		SAFE_ZONE_BOTTOM, SAFE_ZONE_TOP, tostring(frontClosed)))
+	local mountainsMisplaced = 0
 	if #mountainClones > 0 then
+		local minOffset, maxOffset
+		mountainsMisplaced, minOffset, maxOffset = checkWallThroughMountains()
 		print(string.format(
-			"[WorldGenerator] SafeZoneBoundary offset check: +%.1f fits inside %d of %d mountains; reduced for %d segment(s) (mountain too thin, %.0f%% of its thickness)",
+			"[WorldGenerator] SafeZoneBoundary offset check: +%.1f inside the mountain body for %d of %d segments; reduced for %d (mountain too thin, %.0f%% of its thickness); outside the body: %d (expected 0); offsets used: +%.1f..+%.1f",
 			MOUNTAIN_WALL_DEPTH, #mountainClones - reducedWallSegments, #mountainClones, reducedWallSegments,
-			MOUNTAIN_WALL_FALLBACK * 100))
-		print(string.format(
-			"[WorldGenerator] SafeZoneBoundary passes THROUGH the mountain body for %d of %d clones (in front / behind / sticking out: %d, expected 0); rock before the wall: %.1f..%.1f studs",
-			#mountainClones - mountainsMisplaced, #mountainClones, mountainsMisplaced, minStep, maxStep))
+			MOUNTAIN_WALL_FALLBACK * 100, mountainsMisplaced, minOffset, maxOffset))
 	end
 	if not frontClosed then
 		warn(string.format("[WorldGenerator] SafeZoneBoundary has %d gap samples", frontGaps))
